@@ -207,37 +207,11 @@ rf_workflow <- workflow() %>%
   add_recipe(rain_rf_recipe)
 ```
 
-A regression model is also created
-```{r}
-tune_rf_reg_spec <- rand_forest(
-  mtry = 12,
-  trees = 2000,
-  mode = "regression"
-) %>%
-  set_engine("ranger", importance = "impurity")
-
-# Create a recipe for pre-processing
-rain_rf_recipe_regression <- recipe(`rain (mm)` ~ ., data = train) %>%
-  step_rm(willTomorrowRain) %>%
-  step_dummy(all_nominal_predictors()) %>%
-  step_zv(all_predictors())
-
-# Create a workflow to combine the model and the recipe
-rf_workflow_regression <- workflow() %>%
-  add_model(tune_rf_reg_spec) %>%
-  add_recipe(rain_rf_recipe_regression)
-```
 
 Fit the model to the train
 
 ```{r}
 rf_fit <- fit(rf_workflow, data = train)
-```
-and also the regression is fitted
-```
-
-```{r}
-rf_reg_fit <- fit(rf_workflow_regression, data = train)
 ```
 
 Evaluate performances
@@ -250,19 +224,6 @@ train_predictions <- rf_fit %>%
 
 # Evaluate the model's performance on the test set
 test_predictions <- rf_fit %>%
-  predict(test) %>%
-  bind_cols(test)
-```
-
-evaluate performances for the regression model
-```{r}
-# Evaluate the model's performance on the training set
-train_predictions_reg <- rf_reg_fit %>%
-  predict(train) %>%
-  bind_cols(train)
-
-# Evaluate the model's performance on the test set
-test_predictions_reg <- rf_reg_fit %>%
   predict(test) %>%
   bind_cols(test)
 ```
@@ -286,25 +247,6 @@ print(train_metrics)
 print(test_metrics)
 ```
 From this output a little but of overfitting is present since the accuracy on the training set is present
-
-Now the regression model can be evaluated
-```{r}
-# Calculate metrics for training set
-train_metrics_reg <- train_predictions_reg %>%
-  metrics(truth = `rain (mm)`, estimate = .pred)
-
-# Calculate metrics for test set
-test_metrics_reg <- test_predictions_reg %>%
-  metrics(truth = `rain (mm)`, estimate = .pred)
-```
-
-```{r}
-print(train_metrics_reg)
-```
-
-```{r}
-print(test_metrics_reg)
-```
 
 ```{r}
 # Variable importance
@@ -466,7 +408,7 @@ btree_reg_tune <- btree_wflow %>%
       learn_rate(),
       tree_depth(range = c(2, 8)),
       trees(range = c(5, 20)),
-      size = 2
+      size = 10
     ),
     metrics = metr_res
   )
@@ -490,13 +432,19 @@ final_btree
 Calculate the accuracy
 
 ```{r}
+# Define the formula for the model
+formula <- willTomorrowRain ~ .
+
+# Fit the model to the training data using the formula
+final_btree_fit <- fit(final_btree, formula = formula, data = train)
+
 # Evaluate the model's performance on the training set
-train_predictions <- final_btree %>%
+train_predictions <- final_btree_fit %>%
   predict(train) %>%
   bind_cols(train)
 
 # Evaluate the model's performance on the test set
-test_predictions <- final_btree %>%
+test_predictions <- final_btree_fit %>%
   predict(test) %>%
   bind_cols(test)
 
@@ -547,10 +495,11 @@ xgb.plot.tree(model = xgb_model, trees = 0)
 
 ## Conclusion
 
+This project evaluated the effectiveness of Random Forest and Extreme Gradient Boosting (XGBoost) in the classification of weather data to predict the likelihood of rain on the following day. The dataset, originally structured as a time series, was preprocessed to be treated as independent observations for modeling purposes.
 
+The results demonstrated that Random Forest outperformed XGBoost in this particular case. Both models highlighted the significance of the amount of rainfall on the current day as the primary predictor of whether it would rain the next day. The presence or absence of rainfall was a critical factor in determining whether the subsequent day would also be classified as rainy. However, one notable limitation of this approach is that rain occurring overnight (for example, during a storm that spans midnight) may result in the following day being classified as rainy, even if precipitation occurred only briefly after midnight.
 
-
-
+The second most important variable identified by both models was the dew_point, indicating the relevance of the relationship between humidity and temperature in predicting rainfall. This finding suggests that atmospheric moisture, as captured by the dew point, plays a critical role in determining rain conditions for the next day.
 
 
 
