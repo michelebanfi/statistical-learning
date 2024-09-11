@@ -1,0 +1,569 @@
+---
+title: "Weather Forecasting"
+author: "Michele Banfi"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Project
+The aim of the project is to predict the weather given some predictors, such as: `Temperature`, `Dew point`, ... since there is no predictor posed as weather forecast, those predictor will be constructured.
+
+
+## Libraries
+Install packages
+```{r message = FALSE}
+# install.packages("tidymodels")
+# install.packages("tidyverse")
+# install.packages("xgboost")
+# install.packages("ggplot2")
+# install.packages("lubridate")
+# install.packages("ranger")
+# install.packages("vip")
+#install.packages("DiagrammeR")
+```
+Import the libraries used in the project
+```{r message = FALSE}
+library(tidyverse)
+library(tidymodels)
+library(ggplot2)
+library(lubridate)
+library(ranger)
+library(vip)
+library(xgboost)
+library(DiagrammeR)
+```
+
+## Dataset
+
+The dataset used in this project is composed of hourly observation of weather related features. Available <https://huggingface.co/datasets/sayanroy058/Weather-Time-Series-Forecasting>
+
+```{r message=FALSE}
+data <- read_csv("dataset.csv")
+```
+A first visualization of the data
+```{r}
+data
+```
+Check for missing values in the dataset
+```{r}
+sum(is.na(data))
+```
+Remove the column snow if is all 0. And if that's the case precipitation and rain are the same and remove one of them
+```{r}
+# Check if the 'snow' column is all zeros and remove it if true
+if (all(data$`snowfall (cm)` == 0)) {
+  data <- data %>% select(-`snowfall (cm)`)
+}
+
+# If 'precipitation' is equivalent to 'rain', remove 'precipitation'
+if (all(data$`precipitation (mm)`  == data$`rain (mm)`)) {
+  data <- data %>% select(-`precipitation (mm)`)
+}
+```
+
+
+
+Now in order to proceed with the computation, the `time` variable can be grouped into daily data averaging by the mean.
+```{r}
+data <- data %>%
+  mutate(time = as.Date(time)) %>%
+  group_by(time) %>%
+  summarise(across(-`rain (mm)`, mean), `rain (mm)` = sum(`rain (mm)`))
+```
+The new grouped data:
+```{r}
+data
+```
+Since the data was reduced and grouped, check again for null values
+```{r}
+sum(is.na(data))
+```
+
+Now that the data is ready the data summary can be printed
+```{r}
+summary(data)
+```
+All the variables are numeric, but some of them, such as `wind_direction` has some restriction. `wind_direction` needs to be between 0-360; all the percentage variables, needs to range between 0 and 100. All this checks can be done by looking at the `min` and `max` values of the variables.
+
+Since the `time` variable was grouped, `is_Day` is not any more useful now.
+
+```{r}
+data <- data %>%
+  select(-is_Day)
+``` 
+
+```{r}
+data
+```
+## Predictor
+
+The aim of the project will be to predict whereas tomorrow will rain, so a new predictor called `willTomorrowRain` is created. having value `1` if at least one millimeter of rain is recorded in the following day in the variable `rain (mm)`; `0` otherwise
+
+```{r}
+data <- data %>%
+  mutate(willTomorrowRain = ifelse(lead(`rain (mm)`) > 0, 1, 0))
+```
+Set the response variable as a factor
+```{r}
+data$willTomorrowRain <- as.factor(data$willTomorrowRain)
+data <- data %>%
+  filter(!is.na(willTomorrowRain))
+```
+
+```{r}
+data
+```
+Plot the response variable to see the distribution
+```{r}
+data %>%
+  ggplot(aes(x = willTomorrowRain)) +
+  geom_bar()
+```
+
+Now we plot the distribution of the features to get more insights into the distribution of them
+
+```{r}
+data %>%
+  select(-time, -willTomorrowRain) %>%
+  gather(key = "feature", value = "value") %>%
+  ggplot(aes(x = value)) +
+  geom_density() +
+  facet_wrap(~feature, scales = "free")
+```
+
+Another way to visualize the data is the use of boxplots.
+
+```{r}
+data %>%
+  select(-time, -willTomorrowRain) %>%
+  gather(key = "feature", value = "value") %>%
+  ggplot(aes(x = feature, y = value)) +
+  geom_boxplot() +
+  coord_flip()
+```
+
+By looking at the plot is evident that the variables have different scales and/or are skewed, so the data needs to be normalized.
+```{r}
+data <- data %>%
+  select(-time) %>%
+  mutate_if(is.numeric, scale)
+```
+The procedure create some `NaN` values which will set to `0`
+```{r}
+data[is.na(data)] <- 0
+```
+
+
+Plot again the predictors after being normalized
+```{r}
+data %>%
+  select(-willTomorrowRain) %>%
+  gather(key = "feature", value = "value") %>%
+  ggplot(aes(x = value)) +
+  geom_density() +
+  facet_wrap(~feature, scales = "free")
+```
+
+```{r}
+data
+```
+
+
+# Data preparation
+Set the `seed` in order to allow reproducibility of the project
+
+```{r}
+set.seed(0)
+```
+
+Split the data into `train` and `test` set
+```{r}
+train_index <- sample(1:nrow(data), 0.8 * nrow(data))
+train <- data[train_index, ]
+test <- data[-train_index, ]
+```
+
+## Model
+The first model implemented is the random forest model
+```{r}
+tune_rf_spec <- rand_forest(
+  mtry = 13,
+  trees = 2000,
+  mode = "classification"
+) %>%
+  set_engine("ranger", importance = "impurity")
+
+# Create a recipe for pre-processing
+rain_rf_recipe <- recipe(willTomorrowRain ~ ., data = train) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors())
+
+# Create a workflow to combine the model and the recipe
+rf_workflow <- workflow() %>%
+  add_model(tune_rf_spec) %>%
+  add_recipe(rain_rf_recipe)
+```
+
+A regression model is also created
+```{r}
+tune_rf_reg_spec <- rand_forest(
+  mtry = 12,
+  trees = 2000,
+  mode = "regression"
+) %>%
+  set_engine("ranger", importance = "impurity")
+
+# Create a recipe for pre-processing
+rain_rf_recipe_regression <- recipe(`rain (mm)` ~ ., data = train) %>%
+  step_rm(willTomorrowRain) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors())
+
+# Create a workflow to combine the model and the recipe
+rf_workflow_regression <- workflow() %>%
+  add_model(tune_rf_reg_spec) %>%
+  add_recipe(rain_rf_recipe_regression)
+```
+
+Fit the model to the train
+
+```{r}
+rf_fit <- fit(rf_workflow, data = train)
+```
+and also the regression is fitted
+```
+
+```{r}
+rf_reg_fit <- fit(rf_workflow_regression, data = train)
+```
+
+Evaluate performances
+
+```{r}
+# Evaluate the model's performance on the training set
+train_predictions <- rf_fit %>%
+  predict(train) %>%
+  bind_cols(train)
+
+# Evaluate the model's performance on the test set
+test_predictions <- rf_fit %>%
+  predict(test) %>%
+  bind_cols(test)
+```
+
+evaluate performances for the regression model
+```{r}
+# Evaluate the model's performance on the training set
+train_predictions_reg <- rf_reg_fit %>%
+  predict(train) %>%
+  bind_cols(train)
+
+# Evaluate the model's performance on the test set
+test_predictions_reg <- rf_reg_fit %>%
+  predict(test) %>%
+  bind_cols(test)
+```
+
+
+Calculate metrics
+```{r}
+# Calculate metrics for training set
+train_metrics <- train_predictions %>%
+  metrics(truth = willTomorrowRain, estimate = .pred_class)
+
+# Calculate metrics for test set
+test_metrics <- test_predictions %>%
+  metrics(truth = willTomorrowRain, estimate = .pred_class)
+```
+
+```{r}
+print(train_metrics)
+```
+```{r}
+print(test_metrics)
+```
+From this output a little but of overfitting is present since the accuracy on the training set is present
+
+Now the regression model can be evaluated
+```{r}
+# Calculate metrics for training set
+train_metrics_reg <- train_predictions_reg %>%
+  metrics(truth = `rain (mm)`, estimate = .pred)
+
+# Calculate metrics for test set
+test_metrics_reg <- test_predictions_reg %>%
+  metrics(truth = `rain (mm)`, estimate = .pred)
+```
+
+```{r}
+print(train_metrics_reg)
+```
+
+```{r}
+print(test_metrics_reg)
+```
+
+```{r}
+# Variable importance
+rf_fit %>%
+  pull_workflow_fit() %>%
+  vip(num_features = 13)
+```
+
+Can be trivial to say that a precipitation today will forecast rain tomorrow, but this suggest that the place where this data was recorded had in general several days of consevutive rain
+
+
+Now a smaller forest can be tried to compare the results
+```{r}
+# Define the random forest model specification
+tune_rf_spec <- rand_forest(
+  mtry = 13,
+  trees = 250,
+  mode = "classification"
+) %>%
+  set_engine("ranger", importance = "impurity")
+
+# Create a workflow to combine the model and the recipe
+rf_workflow <- workflow() %>%
+  add_model(tune_rf_spec) %>%
+  add_recipe(rain_rf_recipe)
+```
+
+```{r}
+rf_fit <- fit(rf_workflow, data = train)
+```
+
+```{r}
+# Evaluate the model's performance on the training set
+train_predictions <- rf_fit %>%
+  predict(train) %>%
+  bind_cols(train)
+
+# Evaluate the model's performance on the test set
+test_predictions <- rf_fit %>%
+  predict(test) %>%
+  bind_cols(test)
+
+# Calculate metrics for training set
+train_metrics <- train_predictions %>%
+  metrics(truth = willTomorrowRain, estimate = .pred_class)
+
+# Calculate metrics for test set
+test_metrics <- test_predictions %>%
+  metrics(truth = willTomorrowRain, estimate = .pred_class)
+```
+
+```{r}
+print(train_metrics)
+```
+```{r}
+print(test_metrics)
+```
+
+Variable importance
+```{r}
+# Variable importance
+rf_fit %>%
+  pull_workflow_fit() %>%
+  vip(num_features = 13)
+```
+
+The results are similar to the previous but slightly better.
+
+Now let's try a random search
+```{r}
+# Define the random forest model specification with tuning parameters
+tune_rf_spec <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune(),
+  mode = "classification"
+) %>%
+  set_engine("ranger", num.threads = 7)
+
+# Create cross-validation folds
+data_folds <- vfold_cv(data)
+
+# Create a recipe for pre-processing
+# Create a recipe for pre-processing
+rain_rf_recipe <- recipe(willTomorrowRain ~ ., data = train) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors())
+
+# Create a workflow to combine the model and the recipe
+rain_rf_wflow <- workflow() %>%
+  add_model(tune_rf_spec) %>%
+  add_recipe(rain_rf_recipe)
+
+# Define the metrics to evaluate
+metr_res <- metric_set(kap, accuracy)
+
+# Perform random search tuning
+rf_reg_tune <- rain_rf_wflow %>%
+  tune_grid(
+    data_folds,
+    grid = grid_random(
+      trees(range = c(100, 1000)),
+      mtry(range = c(8, 13)),
+      min_n(range = c(6, 8)),
+      size = 5
+    ),
+    metrics = metr_res
+  )
+
+# Collect and print the metrics
+rf_reg_tune %>% collect_metrics()
+
+# Select the best configuration based on the "kap" metric
+best_f1 <- rf_reg_tune %>% select_best(metric = "kap")
+
+# Finalize the model with the best configuration
+final_rf <- finalize_model(tune_rf_spec, best_f1)
+
+# Print the best result configuration
+print(best_f1)
+
+# Output the final model
+final_rf
+```
+## Extreme Gradient Boosting
+Now another model is implemented, the Extreme Gradient Boosting.
+
+```{r}
+# Define the XGBoost model specification with tuning parameters
+tune_btree_spec <- boost_tree(
+  learn_rate = tune(),
+  tree_depth = tune(),
+  trees = tune(),
+  mode = "classification"
+) %>%
+  set_engine("xgboost", nthreads = parallel::detectCores())
+
+# Create cross-validation folds
+rain_folds <- vfold_cv(train)
+
+# Create a recipe for preprocessing
+rain_rf_recipe <- recipe(willTomorrowRain ~ ., data = train) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors())
+
+# Create a workflow to combine the model and the recipe
+btree_wflow <- workflow() %>%
+  add_model(tune_btree_spec) %>%
+  add_recipe(rain_rf_recipe)
+
+# Define the metrics to evaluate
+metr_res <- metric_set(kap, accuracy)
+
+# Perform random search tuning
+btree_reg_tune <- btree_wflow %>%
+  tune_grid(
+    rain_folds,
+    grid = grid_random(
+      learn_rate(),
+      tree_depth(range = c(2, 8)),
+      trees(range = c(5, 20)),
+      size = 2
+    ),
+    metrics = metr_res
+  )
+
+# Collect and print the metrics
+btree_reg_tune %>% collect_metrics()
+
+# Select the best configuration based on the "kap" metric
+best_btree_f1 <- btree_reg_tune %>% select_best(metric = "kap")
+
+# Finalize the model with the best configuration
+final_btree <- finalize_model(tune_btree_spec, best_btree_f1)
+
+# Print the best result configuration
+print(best_btree_f1)
+
+# Output the final model
+final_btree
+```
+
+Calculate the accuracy
+
+```{r}
+# Evaluate the model's performance on the training set
+train_predictions <- final_btree %>%
+  predict(train) %>%
+  bind_cols(train)
+
+# Evaluate the model's performance on the test set
+test_predictions <- final_btree %>%
+  predict(test) %>%
+  bind_cols(test)
+
+# Calculate metrics for training set
+train_metrics <- train_predictions %>%
+  metrics(truth = willTomorrowRain, estimate = .pred_class)
+
+# Calculate metrics for test set
+test_metrics <- test_predictions %>%
+  metrics(truth = willTomorrowRain, estimate = .pred_class)
+```
+
+Print the train metrics
+```{r}
+print(train_metrics)
+```
+
+Print the test metrics
+```{r}
+print(test_metrics)
+```
+
+
+```{r}
+# Assuming final_btree is the finalized model specification
+# Create a new workflow with the finalized model
+final_btree_wflow <- workflow() %>%
+  add_model(final_btree) %>%
+  add_recipe(rain_rf_recipe)
+
+# Fit the workflow to the training data
+final_btree_fit <- fit(final_btree_wflow, data = train)
+
+# Plot the variable importance
+final_btree_fit %>%
+  pull_workflow_fit() %>%
+  vip(num_features = 13)
+```
+
+The tree can be plotted to better visualize it
+```{r}
+xgb_model <- final_btree_fit %>%
+  pull_workflow_fit() %>%
+  .$fit
+# Visualize the first tree in the model
+xgb.plot.tree(model = xgb_model, trees = 0)
+```
+
+## Conclusion
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
