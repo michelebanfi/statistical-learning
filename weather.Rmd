@@ -1,15 +1,16 @@
 ---
 title: "Weather Forecasting"
-author: "Michele Banfi"
+author: "Michele Banfi 869294"
 date: "`r Sys.Date()`"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, comment = NA)
+library(knitr)
 ```
 # Project
-The aim of the project is to predict the weather given some predictors, such as: `Temperature`, `Dew point`, ... since there is no predictor posed as weather forecast, those predictor will be constructured.
+The aim of the project is to predict whether or not, tomorrow will rain. Given some predictors, such as: `Temperature`, `Dew point`, ... the models will classify the following day as "rainy" or not.
 
 
 ## Libraries
@@ -22,10 +23,11 @@ Install packages
 # install.packages("lubridate")
 # install.packages("ranger")
 # install.packages("vip")
-#install.packages("DiagrammeR")
+# install.packages("DiagrammeR")
+# install.packages("GGally")
 ```
 Import the libraries used in the project
-```{r message = FALSE}
+```{r message = FALSE, warning = FALSE}
 library(tidyverse)
 library(tidymodels)
 library(ggplot2)
@@ -34,6 +36,8 @@ library(ranger)
 library(vip)
 library(xgboost)
 library(DiagrammeR)
+library(GGally)
+library(rmarkdown)
 ```
 
 ## Dataset
@@ -45,13 +49,13 @@ data <- read_csv("dataset.csv")
 ```
 A first visualization of the data
 ```{r}
-data
+paged_table(head(data))
 ```
 Check for missing values in the dataset
 ```{r}
 sum(is.na(data))
 ```
-Remove the column snow if is all 0. And if that's the case precipitation and rain are the same and remove one of them
+From a first sight the column `snowfall` seems empty (all equal to 0), so if that's the case the column will be removed; this imply that precipitation and rain are the same, so precipitation will be removed.
 ```{r}
 # Check if the 'snow' column is all zeros and remove it if true
 if (all(data$`snowfall (cm)` == 0)) {
@@ -65,8 +69,7 @@ if (all(data$`precipitation (mm)`  == data$`rain (mm)`)) {
 ```
 
 
-
-Now in order to proceed with the computation, the `time` variable can be grouped into daily data averaging by the mean.
+Now in order to proceed with the computation, the `time` variable can be grouped into daily data averaging by the mean. The averagin by the mean will per performed to those values which are "constrained" such as wind degree and so on, the amount of rain will be summed, since it's a quantity not constrained.
 ```{r}
 data <- data %>%
   mutate(time = as.Date(time)) %>%
@@ -75,7 +78,7 @@ data <- data %>%
 ```
 The new grouped data:
 ```{r}
-data
+paged_table(head(data))
 ```
 Since the data was reduced and grouped, check again for null values
 ```{r}
@@ -96,9 +99,9 @@ data <- data %>%
 ``` 
 
 ```{r}
-data
+paged_table(head(data))
 ```
-## Predictor
+## Predictors
 
 The aim of the project will be to predict whereas tomorrow will rain, so a new predictor called `willTomorrowRain` is created. having value `1` if at least one millimeter of rain is recorded in the following day in the variable `rain (mm)`; `0` otherwise
 
@@ -114,7 +117,7 @@ data <- data %>%
 ```
 
 ```{r}
-data
+paged_table(head(data))
 ```
 Plot the response variable to see the distribution
 ```{r}
@@ -122,6 +125,26 @@ data %>%
   ggplot(aes(x = willTomorrowRain)) +
   geom_bar()
 ```
+A 2D plot of the two variables on the PCA can be helpful
+
+```{r}
+# Perform PCA on the data
+pca_data <- train %>%
+  select(-willTomorrowRain) %>%
+  prcomp(center = TRUE, scale. = TRUE)
+
+# Extract the first two principal components
+pca_data <- as.data.frame(pca_data$x[, 1:2])
+
+# Bind the principal components with the response variable
+pca_data <- cbind(pca_data, willTomorrowRain = train$willTomorrowRain)
+
+# Plot the first two principal components
+pca_data %>%
+  ggplot(aes(x = PC1, y = PC2, color = willTomorrowRain)) +
+  geom_point()
+```
+
 
 Now we plot the distribution of the features to get more insights into the distribution of them
 
@@ -156,9 +179,59 @@ The procedure create some `NaN` values which will set to `0`
 data[is.na(data)] <- 0
 ```
 
+Check for collinearity between predictors
+```{r}
+data %>%
+  select(-willTomorrowRain) %>%
+  cor() %>%
+  corrplot::corrplot()
+```
+
+As expected some of the values are correlated, such as `relative_humidity` and `vapour_pressure_deficit (kPa)`. A scatter plot will gave more insights on how the data is correlated.
+
+```{r}
+data %>%
+  ggplot(aes(x = relative_humidity, y = `vapour_pressure_deficit (kPa)`)) +
+  geom_point()
+```
+
+There is a correlation between those two variables, but it's not completley linear
+
+```{r}
+data %>%
+  ggplot(aes(x = `pressure_msl (hPa)`, y = `surface_pressure (hPa)`)) +
+  geom_point()
+```
+
+Whereas this two variables are more correlated so only one them can be maintened
+
+```{r}
+paged_table(data %>% select(-`pressure_msl (hPa)`))
+```
+
+Also is worth checking the cloud related variables
+```{r}
+data %>%
+  ggplot(aes(x = `cloud_cover_low (%)`, y = `cloud_cover_mid (%)`)) +
+  geom_point()
+```
+
+```{r}
+data %>%
+  ggplot(aes(x = `cloud_cover_mid (%)`, y = `cloud_cover_high (%)`)) +
+  geom_point()
+```
+
+```{r}
+data %>%
+  ggplot(aes(x = `cloud_cover (%)`, y = `cloud_cover_mid (%)`)) +
+  geom_point()
+```
+
+From this scatter plots there is no clear evidence of a linear correlation between clouds variables.
 
 Plot again the predictors after being normalized
-```{r}
+```{r warning = FALSE}
 data %>%
   select(-willTomorrowRain) %>%
   gather(key = "feature", value = "value") %>%
@@ -168,7 +241,7 @@ data %>%
 ```
 
 ```{r}
-data
+paged_table(head(data))
 ```
 
 
@@ -241,12 +314,69 @@ test_metrics <- test_predictions %>%
 ```
 
 ```{r}
-print(train_metrics)
+paged_table(train_metrics)
 ```
 ```{r}
-print(test_metrics)
+paged_table(test_metrics)
 ```
-From this output a little but of overfitting is present since the accuracy on the training set is present
+From this output a little but of overfitting is present since the accuracy on the test set is lower compared to the one on the training set
+
+```{r warning = FALSE}
+# Variable importance
+rf_fit %>%
+  pull_workflow_fit() %>%
+  vip(num_features = 13)
+```
+
+Can be trivial to say that the most important variable is the rainfall of the previous day, but that variable can also be equal to 0 and combined with `dew_point` leads to a good prediction. Now to be sure, the same task can be performed but without `rain (mm)`.
+
+```{r}
+tune_rf_spec <- rand_forest(
+  mtry = 12,
+  trees = 2000,
+  mode = "classification"
+) %>%
+  set_engine("ranger", importance = "impurity")
+
+# Create a recipe for pre-processing
+rain_rf_recipe <- recipe(willTomorrowRain ~ ., data = train) %>%
+  step_rm(`rain (mm)`) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors())
+
+# Create a workflow to combine the model and the recipe
+rf_workflow <- workflow() %>%
+  add_model(tune_rf_spec) %>%
+  add_recipe(rain_rf_recipe)
+
+rf_fit <- fit(rf_workflow, data = train)
+
+# Evaluate the model's performance on the training set
+train_predictions <- rf_fit %>%
+  predict(train) %>%
+  bind_cols(train)
+
+# Evaluate the model's performance on the test set
+test_predictions <- rf_fit %>%
+  predict(test) %>%
+  bind_cols(test)
+
+# Calculate metrics for training set
+train_metrics <- train_predictions %>%
+  metrics(truth = willTomorrowRain, estimate = .pred_class)
+
+# Calculate metrics for test set
+test_metrics <- test_predictions %>%
+  metrics(truth = willTomorrowRain, estimate = .pred_class)
+```
+
+```{r}
+paged_table(train_metrics)
+```
+
+```{r}
+paged_table(test_metrics)
+```
 
 ```{r}
 # Variable importance
@@ -255,15 +385,29 @@ rf_fit %>%
   vip(num_features = 13)
 ```
 
-Can be trivial to say that a precipitation today will forecast rain tomorrow, but this suggest that the place where this data was recorded had in general several days of consevutive rain
+The results are similar to the previous and the most important variable now is `dew_point`.
 
 
-Now a smaller forest can be tried to compare the results
+In order to compare the accuracy, a shallow forecast method is produced. The method will forecast the tomorrows rain only if it rained today
+```{r}
+train %>%
+  mutate(
+    willTomorrowRain = as.numeric(as.character(willTomorrowRain)),
+    predictedRain = ifelse(lag(willTomorrowRain, default = 0) == 0, 0, 1)
+  ) %>%
+  summarise(
+    accuracy = sum(willTomorrowRain == predictedRain) / n()
+  )
+```
+The result is almost a random guess.
+
+
+Now a smaller forest can be tried to compare the results since overfitting was experienced. As a rule of thumb for random forest, the number of tree should be around $\sqrt p$ for classification.
 ```{r}
 # Define the random forest model specification
 tune_rf_spec <- rand_forest(
   mtry = 13,
-  trees = 250,
+  trees = 4,
   mode = "classification"
 ) %>%
   set_engine("ranger", importance = "impurity")
@@ -274,7 +418,7 @@ rf_workflow <- workflow() %>%
   add_recipe(rain_rf_recipe)
 ```
 
-```{r}
+```{r warning = FALSE}
 rf_fit <- fit(rf_workflow, data = train)
 ```
 
@@ -299,10 +443,12 @@ test_metrics <- test_predictions %>%
 ```
 
 ```{r}
-print(train_metrics)
+paged_table(train_metrics)
 ```
+
+
 ```{r}
-print(test_metrics)
+paged_table(test_metrics)
 ```
 
 Variable importance
@@ -315,7 +461,8 @@ rf_fit %>%
 
 The results are similar to the previous but slightly better.
 
-Now let's try a random search
+Now a random search on the space can be performed to find better results. A grid search can also be performed to find the global optimum in the search space, but it can be computationally expensive.
+
 ```{r}
 # Define the random forest model specification with tuning parameters
 tune_rf_spec <- rand_forest(
@@ -357,7 +504,7 @@ rf_reg_tune <- rain_rf_wflow %>%
   )
 
 # Collect and print the metrics
-rf_reg_tune %>% collect_metrics()
+paged_table(rf_reg_tune %>% collect_metrics())
 
 # Select the best configuration based on the "kap" metric
 best_f1 <- rf_reg_tune %>% select_best(metric = "kap")
@@ -371,6 +518,8 @@ print(best_f1)
 # Output the final model
 final_rf
 ```
+
+
 ## Extreme Gradient Boosting
 Now another model is implemented, the Extreme Gradient Boosting.
 
@@ -414,7 +563,7 @@ btree_reg_tune <- btree_wflow %>%
   )
 
 # Collect and print the metrics
-btree_reg_tune %>% collect_metrics()
+paged_table(btree_reg_tune %>% collect_metrics())
 
 # Select the best configuration based on the "kap" metric
 best_btree_f1 <- btree_reg_tune %>% select_best(metric = "kap")
@@ -431,7 +580,7 @@ final_btree
 
 Calculate the accuracy
 
-```{r}
+```{r warning = FALSE}
 # Define the formula for the model
 formula <- willTomorrowRain ~ .
 
@@ -459,16 +608,16 @@ test_metrics <- test_predictions %>%
 
 Print the train metrics
 ```{r}
-print(train_metrics)
+paged_table(train_metrics)
 ```
 
 Print the test metrics
 ```{r}
-print(test_metrics)
+paged_table(test_metrics)
 ```
 
 
-```{r}
+```{r warning = FALSE}
 # Assuming final_btree is the finalized model specification
 # Create a new workflow with the finalized model
 final_btree_wflow <- workflow() %>%
@@ -484,7 +633,7 @@ final_btree_fit %>%
   vip(num_features = 13)
 ```
 
-The tree can be plotted to better visualize it
+The first tree can be plotted to better visualize the splitting performed
 ```{r}
 xgb_model <- final_btree_fit %>%
   pull_workflow_fit() %>%
@@ -493,11 +642,12 @@ xgb_model <- final_btree_fit %>%
 xgb.plot.tree(model = xgb_model, trees = 0)
 ```
 
+
 ## Conclusion
 
 This project evaluated the effectiveness of Random Forest and Extreme Gradient Boosting (XGBoost) in the classification of weather data to predict the likelihood of rain on the following day. The dataset, originally structured as a time series, was preprocessed to be treated as independent observations for modeling purposes.
 
-The results demonstrated that Random Forest outperformed XGBoost in this particular case. Both models highlighted the significance of the amount of rainfall on the current day as the primary predictor of whether it would rain the next day. The presence or absence of rainfall was a critical factor in determining whether the subsequent day would also be classified as rainy. However, one notable limitation of this approach is that rain occurring overnight (for example, during a storm that spans midnight) may result in the following day being classified as rainy, even if precipitation occurred only briefly after midnight.
+The results demonstrated that Random Forest and XGBoost obtained similar results in this particular case. Both models highlighted the significance of the amount of rainfall on the current day as the primary predictor of whether it would rain the next day. The presence or absence of rainfall was a critical factor in determining whether the subsequent day would also be classified as rainy. However, one notable limitation of this approach is that rain occurring overnight (for example, during a storm that spans midnight) may result in the following day being classified as rainy, even if precipitation occurred only briefly after midnight. To account for this limitation, the model was tried without that predictor and lead to similar results.
 
 The second most important variable identified by both models was the dew_point, indicating the relevance of the relationship between humidity and temperature in predicting rainfall. This finding suggests that atmospheric moisture, as captured by the dew point, plays a critical role in determining rain conditions for the next day.
 
